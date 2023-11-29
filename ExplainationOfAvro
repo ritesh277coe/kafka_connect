@@ -1,0 +1,168 @@
+##KAFKA AVROSERDE 
+
+[Confluent link Must Read/Streams](https://docs.confluent.io/platform/current/streams/developer-guide/datatypes.html#avro)
+
+[Confluent link Must Read/Producer-consumer](https://docs.confluent.io/platform/current/schema-registry/serdes-develop/serdes-avro.html#avro-schema-serializer-and-deserializer)
+
+[Example of specific/Generic](https://www.learn-codes.net/javascript/java-gradle-generate-pojo-from-avro-schema/)
+
+
+###User has Avro schema,
+
+    {
+       "namespace": "io.confluent.developer.avro",
+       "type": "record",
+       "name": "ApplianceOrder",
+       "fields": [
+            {"name": "order_id", "type": "string"},
+            {"name": "appliance_id", "type": "string"},
+            {"name": "user_id", "type": "string"},
+            {"name": "time", "type": "long"}
+        ]
+    }
+
+Run it through Avro utility to create associated class `ApplianceOrder`:
+
+    public class ApplianceOrder extends org.apache.avro.specific.SpecificRecordBase implements org.apache.avro.specific.SpecificRecord {}
+    public interface SpecificRecord extends IndexedRecord {}
+    public interface IndexedRecord extends GenericContainer {
+      void put(int i, Object v);
+      Object get(int i);
+      default boolean hasField(String key)
+    }
+    public interface GenericContainer {
+      Schema getSchema();
+    }
+
+So most important functions are `get/put` and `getSchema`.
+
+Now user need to send/receive ApplianceOrder on wire, i.e User needs `Serializer/Deserializer` on wire. 
+In Kafka, it is called as `Serde`. For Avro, class is called `SpecificAvroSerde`.
+So to create Serde, we can use below function to create SpecificAvroSerde for any type T, in our case ApplianceOrder.
+IMP: 
+
+    static <T extends SpecificRecord> SpecificAvroSerde<T> getSpecificAvroSerde(final Map<String, Object> serdeConfig)
+    {
+        final SpecificAvroSerde<T> specificAvroSerde = new SpecificAvroSerde<>();
+        specificAvroSerde.configure(serdeConfig, false);
+        return specificAvroSerde;
+    }
+
+Where:
+
+    public class SpecificAvroSerde<T extends org.apache.avro.specific.SpecificRecord> implements Serde<T> {
+        public SpecificAvroSerde() {
+            inner = Serdes.serdeFrom(new SpecificAvroSerializer<T>(), new SpecificAvroDeserializer<T>());
+        }
+        ...
+    }
+    public interface Serde<T> extends Closeable {
+        default void configure(Map<String, ?> configs, boolean isKey) { }
+        @Override
+        default void close() { }
+        Serializer<T> serializer();
+        Deserializer<T> deserializer();
+    }
+
+The serializer/deserializer used in SpecificAvroSerde are
+    
+    io.confluent.kafka.streams.serdes.avro.SpecificAvroSerializer<T> implements Serializer<T>
+    public SpecificAvroSerializer() {
+      inner = new KafkaAvroSerializer(); //THIS IS THE class where magin of serialization happens
+    }
+    io.confluent.kafka.streams.serdes.avro.SpecificAvroDeserializer<T> implements DeSerializer<T>
+
+
+To serialize/deserialize ApplianceOrder:
+    
+    SpecificAvroSerde<ApplianceOrder> applianceSerde = new SpecificAvroSerde<ApplianceOrder>();
+
+and then use the serde in kafkastream:
+
+    KStream<String, ApplianceOrder> applianceStream =
+    builder.stream(streamOneInput, Consumed.with(Serdes.String(), applianceSerde))
+    .peek((key, value) -> System.out.println("Appliance stream incoming record key " + key + " value " + value));
+
+where:
+
+    public static <K, V> Consumed<K, V> with(final Serde<K> keySerde, final Serde<V> valueSerde)
+
+and ApplianceSerde which is instance of SpecificAvroSerde<ApplianceOrder> implements Serde.
+
+NOTE: 
+
+      Package for avro serde is `io.confluent.kafka.streams.serdes.avro` and  `KafkaAvroSerializer` and `KafkaAvroDeSerializer` classes does all avro magic using schema registry. 
+      It extends AbstractKafkaAvroSerializer/AbstractKafkaAvroDeserializer which has all the code.
+
+
+
+Example of GenericRecord using GenericAvroSerde:
+
+      // Generic Avro serde example
+      import io.confluent.kafka.streams.serdes.avro.GenericAvroSerde;
+
+      // When configuring the default serdes of StreamConfig
+      final Properties streamsConfiguration = new Properties();
+      streamsConfiguration.put(StreamsConfig.DEFAULT_KEY_SERDE_CLASS_CONFIG, GenericAvroSerde.class);
+      streamsConfiguration.put(StreamsConfig.DEFAULT_VALUE_SERDE_CLASS_CONFIG, GenericAvroSerde.class);
+      streamsConfiguration.put("schema.registry.url", "http://my-schema-registry:8081");
+      
+      // When you want to override serdes explicitly/selectively
+      final Map<String, String> serdeConfig = Collections.singletonMap("schema.registry.url", "http://my-schema-registry:8081");
+      final Serde<GenericRecord> keyGenericAvroSerde = new GenericAvroSerde();
+      keyGenericAvroSerde.configure(serdeConfig, true); // `true` for record keys
+
+      final Serde<GenericRecord> valueGenericAvroSerde = new GenericAvroSerde();
+      valueGenericAvroSerde.configure(serdeConfig, false); // `false` for record values
+      
+      StreamsBuilder builder = new StreamsBuilder();
+      KStream<GenericRecord, GenericRecord> textLines =
+      builder.stream(keyGenericAvroSerde, valueGenericAvroSerde, "my-avro-topic");
+
+IMP:  How to create concrete class from GenericRecord interface so that KafkaAvroSerializer can get schema.
+      Interface `GenericRecord` implements `IndexRecord` and `IndexRecord` implement `GenericContainer` and `GenericContainer` only has `getSchema`.
+      So how to create GenericRecord so that schema can be added. We can use class `org.apache.avro.generic.GenericData` and `Record` method create a GenericRecord.
+      
+
+
+// Specific Avro serde example
+      
+      import io.confluent.kafka.streams.serdes.avro.SpecificAvroSerde;
+      
+      // When configuring the default serdes of StreamConfig
+      final Properties streamsConfiguration = new Properties();
+      streamsConfiguration.put(StreamsConfig.DEFAULT_KEY_SERDE_CLASS_CONFIG, SpecificAvroSerde.class);
+      streamsConfiguration.put(StreamsConfig.DEFAULT_VALUE_SERDE_CLASS_CONFIG, SpecificAvroSerde.class);
+      streamsConfiguration.put("schema.registry.url", "http://my-schema-registry:8081");
+      
+      // When you want to override serdes explicitly/selectively
+      final Map<String, String> serdeConfig = Collections.singletonMap("schema.registry.url",
+      "http://my-schema-registry:8081");
+      // `Foo` and `Bar` are Java classes generated from Avro schemas
+      final Serde<Foo> keySpecificAvroSerde = new SpecificAvroSerde<>();
+      keySpecificAvroSerde.configure(serdeConfig, true); // `true` for record keys
+      final Serde<Bar> valueSpecificAvroSerde = new SpecificAvroSerde<>();
+      valueSpecificAvroSerde.configure(serdeConfig, false); // `false` for record values
+      
+      StreamsBuilder builder = new StreamsBuilder();
+      KStream<Foo, Bar> textLines = builder.stream("my-avro-topic", Consumed.with(keySpecificAvroSerde, valueSpecificAvroSerde));
+
+//Both Generic/SpecificSerde uses KafkaAvroSerializer/KafkaAvroDeserializer and the way Generic/SpecificRecord is serialized is:
+
+      @Override
+      //ALL THE MAGIC OF SENDING MESSAGE HAPPENS WITH IN AvroSchemaUtils.getSchema and serializeImpl
+      public byte[] serialize(String topic, Object record) {
+         if (record == null) {
+         return null;
+      }
+      //Get or construct the schema of object..if object is instance of GenericContainer
+      //object.getSchema() or object is instance of Map,  construct it
+      AvroSchema schema = new AvroSchema(AvroSchemaUtils.getSchema(record, useSchemaReflection, removeJavaProperties));
+
+      //Then the the schema is used to peek into registry and send the record
+      return serializeImpl(getSubjectName(topic, isKey, record, schema), record, schema);
+      }
+
+In `Kafka-connect`: All the avro magic happens in `io.confluent.connect.avro.AvroConverter`, and it uses AbstractKafkaAvroSerializer/AbstractKafkaAvroDeserializer
+
+com.oracle.OSvC.thidwick.kafka.serialization.specific.EnvelopeSerde is used in OSVC to serialize/deserialize AvroEnvelope
